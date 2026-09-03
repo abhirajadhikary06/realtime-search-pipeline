@@ -1,3 +1,7 @@
+<p align="center">
+  <img width="2743" height="620" alt="image" src="https://github.com/user-attachments/assets/abf939a2-462c-4f43-aefa-6587be51a3d9" />
+</p>
+
 # Realtime Product Search Pipeline
 
 A distributed, end-to-end streaming search pipeline built with Apache Kafka, Apache Flink, and Elasticsearch. The system ingests streaming product update events, processes and cleanses them in real time using PyFlink, and indexes them into Elasticsearch for instant retrieval and monitoring in Kibana.
