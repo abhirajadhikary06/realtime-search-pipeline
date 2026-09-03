@@ -1,0 +1,131 @@
+services:
+  # ─── Messaging layer (Kafka in KRaft mode — no Zookeeper) ────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    ports:
+      - "9092:9092"       # internal (container-to-container)
+      - "29092:29092"     # host access (e.g. local scripts, kafkacat)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Any fixed, valid base64 16-byte UUID works here for a single-node dev cluster.
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Runs scripts/create-topic.sh once Kafka is healthy, then exits.
+  topic-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: topic-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts
+    entrypoint: ["bash", "/scripts/create-topic.sh"]
+    networks:
+      - pipeline-net
+
+  # ─── Producer ────────────────────────────────────────────────────
+  producer:
+    image: python:3.11-slim
+    container_name: producer
+    depends_on:
+      - topic-init
+    working_dir: /app
+    volumes:
+      - ./producer:/app
+    command: sh -c "pip install --no-cache-dir kafka-python && python producer.py"
+    networks:
+      - pipeline-net
+    restart: on-failure
+
+  # ─── Stream processing ───────────────────────────────────────────
+  jobmanager:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"        # Flink web UI
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+    volumes:
+      - ./flink:/opt/flink/usrlib
+    networks:
+      - pipeline-net
+
+  taskmanager:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: flink-taskmanager
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 2
+    volumes:
+      - ./flink:/opt/flink/usrlib
+    networks:
+      - pipeline-net
+
+  # ─── Search layer ────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+      - ./elasticsearch/index.json:/usr/share/elasticsearch/index.json:ro
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: kibana
+    depends_on:
+      - elasticsearch
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    networks:
+      - pipeline-net
+
+networks:
+  pipeline-net:
+    driver: bridge
+
+volumes:
+  es-data:
